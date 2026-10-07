@@ -18,6 +18,7 @@ class PlantReport:
         audit: object,
         namespace: object,
         topology: object,
+        custody: object,
     ) -> None:
         self._store = store
         self._book = book
@@ -27,6 +28,20 @@ class PlantReport:
         self._audit = audit
         self._ns = namespace
         self._topology = topology
+        self._custody = custody
+
+    def handover_summary(self) -> dict[str, object]:
+        state = self._store.state()
+        open_count = sum(1 for order in state.handovers.values() if order.status.open)
+        return {
+            "custody_records": len(state.custody),
+            "handover_sheets": len(state.handovers),
+            "open_handovers": open_count,
+            "carousel_moves": len(state.carousel_moves),
+            "custody_consistent": (
+                self._custody.consistent() if self._custody is not None else None
+            ),
+        }
 
     def summary(self) -> dict[str, object]:
         flights = self._book.list()
@@ -46,6 +61,7 @@ class PlantReport:
             "batch": self._belt.batch(),
             "watermark": self._store.watermark,
             "quota": self._quota.limits(),
+            "handovers": self.handover_summary(),
         }
 
     def flight_rows(self) -> list[dict[str, object]]:
@@ -79,6 +95,8 @@ class PlantReport:
             f"sort records      : {summary['sort_records']}",
             f"audit entries     : {summary['audit_entries']} intact={summary['audit_intact']}",
             f"carousel          : {summary['carousel']} batch={summary['batch']}",
+            f"handovers         : {summary['handovers']['handover_sheets']} "
+            f"({summary['handovers']['open_handovers']} open)",
             f"journal watermark : {summary['watermark']}",
         ]
         return "\n".join(lines) + "\n"

@@ -19,9 +19,11 @@ from bagsort.flight.book import FlightBook
 from bagsort.flight.close import FlightCloser
 from bagsort.flight.mapping import BagMapping
 from bagsort.flight.schedule import ScheduleBoard
+from bagsort.handover.history import HandoverHistory
+from bagsort.handover.ledger import CustodyLedger
 from bagsort.ids import IdFactory
 from bagsort.inject.injector import Injector
-from bagsort.model.entities import Bag, Flight, Reading, SortRecord
+from bagsort.model.entities import Actor, Bag, Flight, Reading, SortRecord
 from bagsort.model.errors import unknown_bag
 from bagsort.ns.chutes import ChuteRegistry
 from bagsort.ns.namespace import Namespace
@@ -69,6 +71,8 @@ class Plant:
     quota: QuotaBook
     audit: AuditChain
     report: PlantReport
+    custody: CustodyLedger
+    handover_history: HandoverHistory
 
     @property
     def topology(self):
@@ -107,6 +111,8 @@ class Plant:
         belt = Belt(store, clock, IdFactory("cmd"))
 
         audit = AuditChain(store, clock, handling_line())
+        custody = CustodyLedger(store, clock)
+        handover_history = HandoverHistory(store)
         audit_subscriber = _AuditSubscriber(audit)
         for topic in (
             "bag.checked_in",
@@ -117,11 +123,15 @@ class Plant:
             "chute.assigned",
             "belt.switched",
             "bag.remapped",
+            "bag.custody_registered",
+            "handover.proposed",
+            "handover.confirmed",
+            "handover.aborted",
         ):
             bus.subscribe(topic, audit_subscriber)
 
         report = PlantReport(
-            store, book, chutes, belt, quota, audit, namespace, handling_line()
+            store, book, chutes, belt, quota, audit, namespace, handling_line(), custody
         )
         return cls(
             store=store,
@@ -147,6 +157,8 @@ class Plant:
             quota=quota,
             audit=audit,
             report=report,
+            custody=custody,
+            handover_history=handover_history,
         )
 
     # -- operator operations ----------------------------------------------
@@ -243,8 +255,77 @@ class Plant:
     def set_quota(self, flight_id: str, limit: int) -> int:
         return self.quota.set_limit(flight_id, limit)
 
+    # -- inter-terminal handover -------------------------------------------
+
+    def actor(self, name: str, terminal: str, purpose: str) -> Actor:
+        return Actor(name=name.strip(), terminal=terminal.strip().upper(), purpose=purpose.strip())
+
+    def register_custody(self, bag_id: str, actor: Actor):
+        """Claim a prefixed bag id once in the namespace shared by both halls."""
+
+        record = self.custody.register(bag_id, actor.terminal, actor)
+        self.bus.publish(
+            "bag.custody_registered",
+            bag_id=record.bag_id,
+            terminal=record.terminal,
+            actor=actor.name,
+            purpose=actor.purpose,
+        )
+        return record
+
+    def propose_handover(self, bag_id: str, actor: Actor, purpose: str = "", carousel: str = ""):
+        """Sender side: the bag enters the transfer area, ownership stays put."""
+
+        order = self.custody.propose(bag_id, actor, purpose, carousel)
+        self.bus.publish(
+            "handover.proposed",
+            handover_id=order.id,
+            bag_id=order.bag_id,
+            from_terminal=order.from_terminal,
+            to_terminal=order.to_terminal,
+            actor=actor.name,
+            actor_terminal=actor.terminal,
+            purpose=order.purpose,
+        )
+        return order
+
+    def confirm_handover(self, order_id: str, actor: Actor, carousel: str = ""):
+        """Receiver side: only this confirmation completes the handover."""
+
+        order = self.custody.confirm(order_id, actor, carousel)
+        self.bus.publish(
+            "handover.confirmed",
+            handover_id=order.id,
+            bag_id=order.bag_id,
+            from_terminal=order.from_terminal,
+            to_terminal=order.to_terminal,
+            actor=actor.name,
+            actor_terminal=actor.terminal,
+            purpose=actor.purpose,
+        )
+        return order
+
+    def abort_handover(self, order_id: str, actor: Actor, reason: str = ""):
+        """Interrupt before confirmation; responsibility returns to the sender."""
+
+        order = self.custody.abort(order_id, actor, reason)
+        self.bus.publish(
+            "handover.aborted",
+            handover_id=order.id,
+            bag_id=order.bag_id,
+            from_terminal=order.from_terminal,
+            to_terminal=order.to_terminal,
+            actor=actor.name,
+            actor_terminal=actor.terminal,
+            purpose=actor.purpose,
+            reason=order.abort_reason,
+        )
+        return order
+
     def verify(self) -> bool:
-        return self.audit.verify()
+        # The tamper-evident chain plus the three-way custody agreement are
+        # both part of "the plant's books agree".
+        return self.audit.verify() and self.custody.consistent()
 
 
 class _AuditSubscriber:
@@ -259,6 +340,10 @@ class _AuditSubscriber:
         "chute.assigned": ("chute_assign", "chute"),
         "belt.switched": ("belt_switch", "belt"),
         "bag.remapped": ("remap", "checkin"),
+        "bag.custody_registered": ("custody_register", "handover"),
+        "handover.proposed": ("handover_propose", "handover"),
+        "handover.confirmed": ("handover_confirm", "handover"),
+        "handover.aborted": ("handover_abort", "handover"),
     }
 
     def __init__(self, audit: AuditChain) -> None:

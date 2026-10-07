@@ -41,3 +41,25 @@ class Verdict(str, Enum):
     FRESH = "fresh"
     REPLAYED = "replayed"
     ROLLED_OVER = "rolled_over"
+
+
+class HandoverStatus(str, Enum):
+    """Lifecycle of one inter-terminal baggage handover.
+
+    A handover is *proposed* as soon as the sending terminal lets a bag enter
+    the shared transfer area, but responsibility does not move at that point.
+    It only moves when the receiving terminal confirms acceptance, which is
+    also the only way the handover reaches *completed*. An interrupted
+    handover is *aborted* and the bag returns to the sender's responsibility,
+    exactly as before the proposal.
+    """
+
+    PROPOSED = "proposed"
+    COMPLETED = "completed"
+    ABORTED = "aborted"
+
+    @property
+    def open(self) -> bool:
+        """Whether the handover still waits for the receiving terminal."""
+
+        return self is HandoverStatus.PROPOSED

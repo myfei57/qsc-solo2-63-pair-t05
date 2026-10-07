@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .enums import BagState, FlightState
+from .enums import BagState, FlightState, HandoverStatus
 
 
 def _clean(raw: Any) -> Any:
@@ -283,3 +283,179 @@ class AuditEntry:
             digest=str(raw.get("digest", "")),
             at=str(raw.get("at", "")),
         )
+
+
+@dataclass(frozen=True)
+class CustodyRecord:
+    """Which terminal is responsible for one bag right now.
+
+    ``epoch`` starts at one when the bag is first claimed and is bumped on
+    every completed handover and every rollback, so two terminals comparing
+    their views can tell the responsible party apart from a stale one.
+    """
+
+    bag_id: str
+    terminal: str
+    epoch: int = 1
+    updated_at: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "bag_id": self.bag_id,
+            "terminal": self.terminal,
+            "epoch": self.epoch,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CustodyRecord":
+        return cls(
+            bag_id=str(raw["bag_id"]),
+            terminal=str(raw.get("terminal", "")),
+            epoch=int(raw.get("epoch", 1)),
+            updated_at=str(raw.get("updated_at", "")),
+        )
+
+    def evolved(self, **changes: Any) -> "CustodyRecord":
+        return replace(self, **changes)
+
+
+@dataclass(frozen=True)
+class CarouselMove:
+    """One carousel record tied to a handover step.
+
+    The responsible terminal is denormalised on every move so a carousel
+    record can be compared directly against the custody record of the same
+    bag: the latest active move must name the responsible terminal.
+    """
+
+    id: str
+    bag_id: str
+    order_id: str
+    carousel: str
+    terminal: str
+    phase: str
+    at: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "bag_id": self.bag_id,
+            "order_id": self.order_id,
+            "carousel": self.carousel,
+            "terminal": self.terminal,
+            "phase": self.phase,
+            "at": self.at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CarouselMove":
+        return cls(
+            id=str(raw["id"]),
+            bag_id=str(raw["bag_id"]),
+            order_id=str(raw.get("order_id", "")),
+            carousel=str(raw.get("carousel", "")),
+            terminal=str(raw.get("terminal", "")),
+            phase=str(raw.get("phase", "")),
+            at=str(raw.get("at", "")),
+        )
+
+
+@dataclass(frozen=True)
+class HandoverOrder:
+    """The inter-terminal handover sheet for one bag.
+
+    Both sides confirm explicitly: ``proposed_by`` is the sender letting the
+    bag into the transfer area, ``received_by`` is the receiver accepting it.
+    A handover only becomes :data:`HandoverStatus.COMPLETED` once both fields
+    are present; a proposal with no receiver confirmation stays open and must
+    never be treated as success.
+
+    ``ownership_point`` records the policy decision written onto every sheet:
+    responsibility moves on receiver confirmation, not on entering the
+    transfer area. ``ownership_reason`` explains why, so a dispute over an
+    interrupted handover reads the rule off the sheet instead of someone's
+    memory of a phone call.
+    """
+
+    id: str
+    bag_id: str
+    from_terminal: str
+    to_terminal: str
+    status: HandoverStatus
+    ownership_point: str
+    ownership_reason: str
+    proposed_by: str = ""
+    proposed_by_terminal: str = ""
+    purpose: str = ""
+    received_by: str = ""
+    received_by_terminal: str = ""
+    aborted_by: str = ""
+    aborted_by_terminal: str = ""
+    abort_reason: str = ""
+    proposed_at: str = ""
+    received_at: str = ""
+    aborted_at: str = ""
+    custody_epoch: int = 1
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "bag_id": self.bag_id,
+            "from_terminal": self.from_terminal,
+            "to_terminal": self.to_terminal,
+            "status": self.status.value,
+            "ownership_point": self.ownership_point,
+            "ownership_reason": self.ownership_reason,
+            "proposed_by": self.proposed_by,
+            "proposed_by_terminal": self.proposed_by_terminal,
+            "purpose": self.purpose,
+            "received_by": self.received_by,
+            "received_by_terminal": self.received_by_terminal,
+            "aborted_by": self.aborted_by,
+            "aborted_by_terminal": self.aborted_by_terminal,
+            "abort_reason": self.abort_reason,
+            "proposed_at": self.proposed_at,
+            "received_at": self.received_at,
+            "aborted_at": self.aborted_at,
+            "custody_epoch": self.custody_epoch,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "HandoverOrder":
+        return cls(
+            id=str(raw["id"]),
+            bag_id=str(raw["bag_id"]),
+            from_terminal=str(raw.get("from_terminal", "")),
+            to_terminal=str(raw.get("to_terminal", "")),
+            status=HandoverStatus(raw.get("status", HandoverStatus.PROPOSED.value)),
+            ownership_point=str(raw.get("ownership_point", "")),
+            ownership_reason=str(raw.get("ownership_reason", "")),
+            proposed_by=str(raw.get("proposed_by", "")),
+            proposed_by_terminal=str(raw.get("proposed_by_terminal", "")),
+            purpose=str(raw.get("purpose", "")),
+            received_by=str(raw.get("received_by", "")),
+            received_by_terminal=str(raw.get("received_by_terminal", "")),
+            aborted_by=str(raw.get("aborted_by", "")),
+            aborted_by_terminal=str(raw.get("aborted_by_terminal", "")),
+            abort_reason=str(raw.get("abort_reason", "")),
+            proposed_at=str(raw.get("proposed_at", "")),
+            received_at=str(raw.get("received_at", "")),
+            aborted_at=str(raw.get("aborted_at", "")),
+            custody_epoch=int(raw.get("custody_epoch", 1)),
+        )
+
+    def evolved(self, **changes: Any) -> "HandoverOrder":
+        return replace(self, **changes)
+
+
+@dataclass(frozen=True)
+class Actor:
+    """The caller identity every handover command is audited under."""
+
+    name: str
+    terminal: str
+    purpose: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "terminal": self.terminal, "purpose": self.purpose}

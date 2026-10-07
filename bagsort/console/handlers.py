@@ -778,3 +778,135 @@ def handle_export_sort(server, request: Request) -> Response:
 def handle_export_loads(server, request: Request) -> Response:
     records = _plant(server).belt.loads()
     return csv_response(csv_export.render(csv_export.LOAD_COLUMNS, csv_export.load_rows(records)))
+
+
+# ---------------------------------------------------------------------------
+# inter-terminal handover
+# ---------------------------------------------------------------------------
+
+
+def _actor(server, request: Request):
+    """Build the audited caller identity every handover call must carry."""
+
+    plant = _plant(server)
+    return plant.actor(
+        request.required("actor"),
+        request.required("actor_terminal"),
+        request.required("purpose"),
+    )
+
+
+def handle_register_custody(server, request: Request) -> Response:
+    plant = _plant(server)
+    record = plant.register_custody(request.required("bag_id"), _actor(server, request))
+    return json_response(record.as_dict(), status=201)
+
+
+def handle_list_handovers(server, request: Request) -> Response:
+    return json_response([order.as_dict() for order in _plant(server).handover_history.orders()])
+
+
+def handle_propose_handover(server, request: Request) -> Response:
+    plant = _plant(server)
+    order = plant.propose_handover(
+        request.required("bag_id"),
+        _actor(server, request),
+        request.str_field("purpose"),
+        request.str_field("carousel"),
+    )
+    return json_response(order.as_dict(), status=201)
+
+
+def handle_open_handovers(server, request: Request) -> Response:
+    return json_response([order.as_dict() for order in _plant(server).handover_history.open_orders()])
+
+
+def handle_completed_handovers(server, request: Request) -> Response:
+    return json_response([order.as_dict() for order in _plant(server).handover_history.completed()])
+
+
+def handle_aborted_handovers(server, request: Request) -> Response:
+    return json_response([order.as_dict() for order in _plant(server).handover_history.aborted()])
+
+
+def handle_handovers_between(server, request: Request) -> Response:
+    plant = _plant(server)
+    orders = plant.handover_history.between(
+        request.query_str("from"),
+        request.query_str("to"),
+    )
+    return json_response([order.as_dict() for order in orders])
+
+
+def handle_bag_handovers(server, request: Request) -> Response:
+    orders = _plant(server).handover_history.for_bag(request.param("bag"))
+    return json_response([order.as_dict() for order in orders])
+
+
+def handle_get_handover(server, request: Request) -> Response:
+    plant = _plant(server)
+    order_id = request.param("id")
+    versions = plant.handover_history.versions(order_id)
+    if not versions:
+        return json_response({"error": "not found"}, status=404)
+    payload = versions[-1].as_dict()
+    payload["versions"] = [version.as_dict() for version in versions]
+    if payload["status"] == "completed":
+        payload["reuse"] = plant.handover_history.reuse_confirmation(order_id)
+    return json_response(payload)
+
+
+def handle_confirm_handover(server, request: Request) -> Response:
+    plant = _plant(server)
+    order = plant.confirm_handover(
+        request.param("id"),
+        _actor(server, request),
+        request.str_field("carousel"),
+    )
+    return json_response(order.as_dict())
+
+
+def handle_abort_handover(server, request: Request) -> Response:
+    plant = _plant(server)
+    order = plant.abort_handover(
+        request.param("id"),
+        _actor(server, request),
+        request.str_field("reason"),
+    )
+    return json_response(order.as_dict())
+
+
+def handle_list_custody(server, request: Request) -> Response:
+    custody = _plant(server).store.state().custody
+    return json_response([custody[key].as_dict() for key in sorted(custody)])
+
+
+def handle_verify_custody(server, request: Request) -> Response:
+    plant = _plant(server)
+    bag_id = request.query_str("bag_id")
+    problems = plant.custody.discrepancies(bag_id)
+    if request.query_str("strict") in {"1", "true", "yes"}:
+        plant.custody.require_consistent(bag_id)
+    return json_response({"consistent": not problems, "discrepancies": problems})
+
+
+def handle_get_custody(server, request: Request) -> Response:
+    plant = _plant(server)
+    bag_id = request.param("bag")
+    record = plant.custody.custody_of(bag_id)
+    payload = record.as_dict()
+    payload["responsible"] = plant.custody.responsible_for(bag_id)
+    return json_response(payload)
+
+
+def handle_custody_moves(server, request: Request) -> Response:
+    plant = _plant(server)
+    bag_id = request.param("bag")
+    moves = plant.custody.moves_for(bag_id)
+    latest = plant.custody.last_move_for(bag_id)
+    payload: dict[str, object] = {
+        "bag_id": bag_id,
+        "latest": latest.as_dict() if latest else None,
+        "moves": [move.as_dict() for move in moves],
+    }
+    return json_response(payload)

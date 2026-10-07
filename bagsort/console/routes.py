@@ -156,6 +156,22 @@ def route_table() -> list[Route]:
         Route("GET", "/api/export/audit.csv", "audit trail as CSV", "handle_export_audit"),
         Route("GET", "/api/export/sort.csv", "sort records as CSV", "handle_export_sort"),
         Route("GET", "/api/export/loads.csv", "load records as CSV", "handle_export_loads"),
+        # -- inter-terminal handover --------------------------------------
+        Route("POST", "/api/handovers/custody", "claim a bag id in the shared namespace", "handle_register_custody"),
+        Route("GET", "/api/handovers", "list the latest handover sheets", "handle_list_handovers"),
+        Route("POST", "/api/handovers", "propose a handover into the transfer area", "handle_propose_handover"),
+        Route("GET", "/api/handovers/open", "sheets still awaiting confirmation", "handle_open_handovers"),
+        Route("GET", "/api/handovers/completed", "completed handover sheets", "handle_completed_handovers"),
+        Route("GET", "/api/handovers/aborted", "aborted handover sheets", "handle_aborted_handovers"),
+        Route("GET", "/api/handovers/route", "sheets between two terminals", "handle_handovers_between"),
+        Route("GET", "/api/handovers/bag/{bag}", "handover history for one bag", "handle_bag_handovers"),
+        Route("GET", "/api/handovers/{id}", "read one handover sheet with its versions", "handle_get_handover"),
+        Route("POST", "/api/handovers/{id}/confirm", "receiver confirms acceptance", "handle_confirm_handover"),
+        Route("POST", "/api/handovers/{id}/abort", "interrupt an open handover", "handle_abort_handover"),
+        Route("GET", "/api/custody", "list every custody record", "handle_list_custody"),
+        Route("GET", "/api/custody/verify", "custody, sheet and carousel agreement", "handle_verify_custody"),
+        Route("GET", "/api/custody/{bag}", "responsible terminal for a bag", "handle_get_custody"),
+        Route("GET", "/api/custody/{bag}/moves", "carousel records for a bag", "handle_custody_moves"),
     ]
 
 
