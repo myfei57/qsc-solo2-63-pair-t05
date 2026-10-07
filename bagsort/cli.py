@@ -48,6 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--cycles", type=int, default=6, help="bags to check in")
     demo.add_argument("--persist", action="store_true", help="write a snapshot afterwards")
 
+    handoff = commands.add_parser("handoff", help="run the cross-terminal handoff scenario")
+    handoff.add_argument("--persist", action="store_true", help="write a snapshot afterwards")
+
     commands.add_parser("report", help="print the plant report")
     commands.add_parser("status", help="print the store status")
     commands.add_parser("export", help="print audit and sort records as CSV")
@@ -92,6 +95,16 @@ def _command_demo(store: Store, plant: Plant, args: argparse.Namespace) -> int:
     if args.persist:
         store.persist()
     return 0 if invariants_hold(summary) else 1
+
+
+def _command_handoff(store: Store, plant: Plant, args: argparse.Namespace) -> int:
+    from .handoff.scenario import run_handoff_demo
+
+    summary = run_handoff_demo(plant)
+    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    if args.persist:
+        store.persist()
+    return 0 if summary["reconciled"] and summary["audit_intact"] else 1
 
 
 def _command_report(plant: Plant) -> int:
@@ -153,6 +166,8 @@ def main(argv: list[str] | None = None) -> int:
         return _command_serve(store, plant, args)
     if args.command == "demo":
         return _command_demo(store, plant, args)
+    if args.command == "handoff":
+        return _command_handoff(store, plant, args)
     if args.command == "report":
         return _command_report(plant)
     if args.command == "status":

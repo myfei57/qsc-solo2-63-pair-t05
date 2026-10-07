@@ -91,6 +91,7 @@ class Request:
     payload: dict[str, object] = field(default_factory=dict)
     items: tuple[object, ...] = ()
     params: dict[str, str] = field(default_factory=dict)
+    meta: dict[str, str] = field(default_factory=dict)
 
     def str_field(self, name: str, default: str = "") -> str:
         value = self.payload.get(name, default)
@@ -201,4 +202,9 @@ def build_request(environ: dict[str, object], params: dict[str, str]) -> Request
         payload=payload,
         items=items,
         params=params,
+        meta={
+            "terminal": str(environ.get("HTTP_X_TERMINAL", "")),
+            "operator": str(environ.get("HTTP_X_OPERATOR", "")),
+            "purpose": str(environ.get("HTTP_X_PURPOSE", "")),
+        },
     )

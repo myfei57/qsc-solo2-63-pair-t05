@@ -42,6 +42,13 @@ class State:
     belt_carousel: str = ""
     belt_batch: int = 0
     belt_on_carousel: list[str] = field(default_factory=list)
+    # Cross-terminal handoff desk. Registrations map the shared bag id to its
+    # owning terminal; sheets and carousel records are stored as plain payloads
+    # so the model layer never imports the handoff package.
+    handoff_registry: dict[str, dict[str, Any]] = field(default_factory=dict)
+    handoff_sheets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    handoff_views: dict[str, dict[str, Any]] = field(default_factory=dict)
+    carousel_records: list[dict[str, Any]] = field(default_factory=list)
 
     def copy(self) -> "State":
         return State(
@@ -60,6 +67,10 @@ class State:
             belt_carousel=self.belt_carousel,
             belt_batch=self.belt_batch,
             belt_on_carousel=list(self.belt_on_carousel),
+            handoff_registry=dict(self.handoff_registry),
+            handoff_sheets=dict(self.handoff_sheets),
+            handoff_views=dict(self.handoff_views),
+            carousel_records=list(self.carousel_records),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -83,6 +94,10 @@ class State:
                 "batch": self.belt_batch,
                 "on_carousel": list(self.belt_on_carousel),
             },
+            "handoff_registry": dict(sorted(self.handoff_registry.items())),
+            "handoff_sheets": dict(sorted(self.handoff_sheets.items())),
+            "handoff_views": dict(sorted(self.handoff_views.items())),
+            "carousel_records": list(self.carousel_records),
         }
 
 def apply_entry(state: State, kind: str, payload: dict[str, Any]) -> None:
@@ -153,6 +168,28 @@ def apply_entry(state: State, kind: str, payload: dict[str, Any]) -> None:
         state.belt_on_carousel = []
         state.belt_carousel = str(payload.get("carousel", state.belt_carousel))
         state.belt_batch = int(payload.get("batch", state.belt_batch))
+    elif kind == "handoff.register":
+        entry = dict(payload["entry"])
+        state.handoff_registry[str(entry["bag_id"])] = entry
+    elif kind == "handoff.sheet.put":
+        sheet = dict(payload["sheet"])
+        state.handoff_sheets[str(sheet["id"])] = sheet
+    elif kind == "handoff.view.put":
+        view = dict(payload["view"])
+        state.handoff_views[str(view["terminal"])] = view
+    elif kind == "carousel.record":
+        state.carousel_records.append(dict(payload["record"]))
+    elif kind == "carousel.deactivate":
+        bag_id = str(payload["bag_id"])
+        handoff_id = str(payload["handoff_id"])
+        state.carousel_records = [
+            {**record, "active": False}
+            if str(record["bag_id"]) == bag_id
+            and str(record["handoff_id"]) == handoff_id
+            and bool(record.get("active", True))
+            else record
+            for record in state.carousel_records
+        ]
     else:  # pragma: no cover - guards against a typo in a new command kind
         raise ValidationError(f"unknown journal command {kind!r}")
 

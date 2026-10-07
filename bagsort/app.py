@@ -19,6 +19,8 @@ from bagsort.flight.book import FlightBook
 from bagsort.flight.close import FlightCloser
 from bagsort.flight.mapping import BagMapping
 from bagsort.flight.schedule import ScheduleBoard
+from bagsort.handoff.desk import HandoffDesk
+from bagsort.handoff.entities import Principal
 from bagsort.ids import IdFactory
 from bagsort.inject.injector import Injector
 from bagsort.model.entities import Bag, Flight, Reading, SortRecord
@@ -68,6 +70,7 @@ class Plant:
     belt: Belt
     quota: QuotaBook
     audit: AuditChain
+    handoff: HandoffDesk
     report: PlantReport
 
     @property
@@ -107,6 +110,7 @@ class Plant:
         belt = Belt(store, clock, IdFactory("cmd"))
 
         audit = AuditChain(store, clock, handling_line())
+        handoff = HandoffDesk(store, clock, audit)
         audit_subscriber = _AuditSubscriber(audit)
         for topic in (
             "bag.checked_in",
@@ -146,6 +150,7 @@ class Plant:
             belt=belt,
             quota=quota,
             audit=audit,
+            handoff=handoff,
             report=report,
         )
 
@@ -245,6 +250,72 @@ class Plant:
 
     def verify(self) -> bool:
         return self.audit.verify()
+
+    # -- cross-terminal handoff -------------------------------------------
+
+    @staticmethod
+    def principal(terminal: str, operator: str, purpose: str) -> Principal:
+        return Principal(terminal=terminal, operator=operator, purpose=purpose)
+
+    def register_handoff_bag(self, bag_id: str, principal: Principal, publish: bool = True):
+        entry = self.handoff.register_bag(bag_id, principal)
+        if publish:
+            self.bus.publish(
+                "handoff.registered",
+                bag_id=bag_id,
+                actor_terminal=principal.terminal,
+                operator=principal.operator,
+                purpose=principal.purpose,
+            )
+        return entry
+
+    def open_handoff(self, bag_id: str, principal: Principal, to_terminal: str = "", note: str = "", publish: bool = True):
+        sheet = self.handoff.open_handoff(bag_id, principal, to_terminal, note)
+        if publish:
+            self.bus.publish(
+                "handoff.opened",
+                bag_id=bag_id,
+                handoff_id=sheet.id,
+                actor_terminal=principal.terminal,
+                operator=principal.operator,
+                purpose=principal.purpose,
+            )
+        return sheet
+
+    def confirm_handoff(self, handoff_id: str, principal: Principal, publish: bool = True):
+        sheet = self.handoff.confirm_handoff(handoff_id, principal)
+        if publish:
+            self.bus.publish(
+                "handoff.confirmed",
+                bag_id=sheet.bag_id,
+                handoff_id=handoff_id,
+                actor_terminal=principal.terminal,
+                operator=principal.operator,
+                purpose=principal.purpose,
+            )
+        return sheet
+
+    def interrupt_handoff(self, handoff_id: str, principal: Principal, reason: str, publish: bool = True):
+        sheet = self.handoff.interrupt_handoff(handoff_id, principal, reason)
+        if publish:
+            self.bus.publish(
+                "handoff.interrupted",
+                bag_id=sheet.bag_id,
+                handoff_id=handoff_id,
+                actor_terminal=principal.terminal,
+                operator=principal.operator,
+                purpose=principal.purpose,
+                reason=reason,
+            )
+        return sheet
+
+    def handoff_sheet_text(self, handoff_id: str) -> str:
+        from bagsort.handoff.sheet_text import render_sheet
+
+        return render_sheet(self.handoff.get(handoff_id))
+
+    def handoff_reconcile(self) -> dict[str, object]:
+        return self.handoff.reconcile()
 
 
 class _AuditSubscriber:

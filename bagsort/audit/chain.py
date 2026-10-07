@@ -50,6 +50,26 @@ class AuditChain:
         detail: dict[str, Any] | None = None,
         at: str | None = None,
     ) -> AuditEntry:
+        with self._store.session() as session:
+            entry = self.stamp(kind, subject, stage, detail, at)
+            self._append(session, entry)
+        return entry
+
+    def stamp(
+        self,
+        kind: str,
+        subject: str,
+        stage: str,
+        detail: dict[str, Any] | None = None,
+        at: str | None = None,
+    ) -> AuditEntry:
+        """Build the next linked entry without committing it.
+
+        Used by operations that must keep the audit entry in the same
+        transaction as the state change: the caller appends the returned entry
+        to its own session, so a rollback withdraws the audit trail too.
+        """
+
         if not self._topology.contains(stage):
             raise ValueError(f"unknown handling stage {stage!r}")
         sequence = self.count() + 1
@@ -67,20 +87,24 @@ class AuditChain:
             prev_digest=self.last_digest(),
             at=at or self._clock.now_iso(),
         )
-        digest = digest_of(entry)
-        entry = AuditEntry(
+        return AuditEntry(
             sequence=entry.sequence,
             kind=entry.kind,
             subject=entry.subject,
             detail=entry.detail,
             prev_digest=entry.prev_digest,
-            digest=digest,
+            digest=digest_of(entry),
             at=entry.at,
         )
-        with self._store.session() as session:
-            session.state.audit.append(entry)
-            session.record("audit.append", {"entry": entry.as_dict()}, entry.at)
-        return entry
+
+    def append_to(self, session, entry: AuditEntry) -> None:
+        """Stage a stamped entry inside a caller owned session."""
+
+        self._append(session, entry)
+
+    def _append(self, session, entry: AuditEntry) -> None:
+        session.state.audit.append(entry)
+        session.record("audit.append", {"entry": entry.as_dict()}, entry.at)
 
     def for_subject(self, subject: str) -> list[AuditEntry]:
         return [entry for entry in self.entries() if entry.subject == subject]

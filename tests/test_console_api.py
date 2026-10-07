@@ -8,8 +8,8 @@ import json
 from tests.support import make_server
 
 
-def call(server, method: str, path: str, payload=None, query=None):
-    response = server.call(method, path, payload, query)
+def call(server, method: str, path: str, payload=None, query=None, meta=None):
+    response = server.call(method, path, payload, query, meta=meta)
     if response.content_type.startswith("application/json"):
         return response.status, json.loads(response.body)
     return response.status, response.body.decode("utf-8")
@@ -35,14 +35,25 @@ def test_service_endpoints(server):
     assert call(server, "GET", "/api/system")[1]["terminal"] == "T1"
 
     status, topology = call(server, "GET", "/api/topology")
-    assert topology["count"] == 8
+    assert topology["count"] == 12
     status, stage = call(server, "GET", "/api/topology/tag")
     assert stage["next"] == "inject"
-    assert stage["following"] == ["inject", "sorter", "chute", "recheck", "belt", "audit"]
+    assert stage["following"] == [
+        "inject",
+        "sorter",
+        "chute",
+        "recheck",
+        "belt",
+        "handoff_register",
+        "handoff_open",
+        "handoff_confirm",
+        "handoff_interrupt",
+        "audit",
+    ]
 
     status, catalog = call(server, "GET", "/api/catalog")
     assert status == 200
-    assert len(catalog) >= 90
+    assert len(catalog) >= 100
 
     status, report = call(server, "GET", "/api/report")
     assert status == 200 and "terminal" in report
@@ -305,3 +316,132 @@ def test_wsgi_rejects_a_bad_body(tmp_path):
     chunks = server(environ, start_response)
     assert captured["status"].startswith("400")
     assert json.loads(b"".join(chunks))["error"]
+
+
+# ---------------------------------------------------------------------------
+# cross-terminal handoff
+# ---------------------------------------------------------------------------
+
+
+SENDER_META = {"terminal": "T1", "operator": "agent-lee", "purpose": "dispatch hall transfer"}
+RECEIVER_META = {"terminal": "T2", "operator": "agent-kim", "purpose": "receive hall transfer"}
+
+
+def _start_handoff(server, bag_id="T1-B1"):
+    status, _ = call(
+        server, "POST", "/api/handoff/register", {"bag_id": bag_id}, meta=SENDER_META
+    )
+    assert status == 201
+    status, sheet = call(
+        server,
+        "POST",
+        "/api/handoff/open",
+        {"bag_id": bag_id},
+        meta=SENDER_META,
+    )
+    assert status == 201
+    return sheet
+
+
+def test_handoff_policy_explains_the_rule(server):
+    status, policy = call(server, "GET", "/api/handoff/policy")
+    assert status == 200
+    assert policy["rule"] == "on_confirmation"
+    assert "确认" in policy["reason"]
+
+
+def test_handoff_requires_caller_identity(server):
+    status, error = call(server, "POST", "/api/handoff/register", {"bag_id": "T1-B1"})
+    assert status == 400
+    assert "operator" in error["error"]
+
+
+def test_handoff_register_rejects_duplicate_and_wrong_prefix(server):
+    status, _ = call(
+        server, "POST", "/api/handoff/register", {"bag_id": "T1-B1"}, meta=SENDER_META
+    )
+    assert status == 201
+    assert call(
+        server, "POST", "/api/handoff/register", {"bag_id": "T1-B1"}, meta=SENDER_META
+    )[0] == 409
+    assert call(
+        server, "POST", "/api/handoff/register", {"bag_id": "T2-B2"}, meta=SENDER_META
+    )[0] == 400
+
+
+def test_handoff_full_confirm_flow_over_http(server):
+    sheet = _start_handoff(server)
+    handoff_id = sheet["id"]
+
+    assert call(server, "GET", f"/api/handoff/bag/T1-B1")[1]["owner_terminal"] == "T1"
+
+    # sender cannot confirm
+    assert call(
+        server, "POST", f"/api/handoff/{handoff_id}/confirm", {}, meta=SENDER_META
+    )[0] == 409
+    # receiver confirms; ownership moves
+    status, confirmed = call(
+        server, "POST", f"/api/handoff/{handoff_id}/confirm", {}, meta=RECEIVER_META
+    )
+    assert status == 200 and confirmed["status"] == "confirmed"
+    assert call(server, "GET", "/api/handoff/bag/T1-B1")[1]["owner_terminal"] == "T2"
+
+    status, carousel = call(server, "GET", "/api/handoff/carousel", query={"bag_id": ["T1-B1"]})
+    assert status == 200
+    active = [item for item in carousel if item["active"]]
+    assert len(active) == 1 and active[0]["terminal"] == "T2"
+
+    status, views = call(server, "GET", "/api/handoff/views")
+    assert views["T2"]["bags"] == ["T1-B1"]
+    assert call(server, "GET", "/api/handoff/reconcile")[1]["ok"] is True
+
+    status, text = call(server, "GET", f"/api/handoff/{handoff_id}/text")
+    assert status == 200 and "HANDOFF SHEET" in text
+
+
+def test_handoff_interrupt_rolls_back_over_http(server):
+    sheet = _start_handoff(server, "T1-B9")
+    status, interrupted = call(
+        server,
+        "POST",
+        f"/api/handoff/{sheet['id']}/interrupt",
+        {"reason": "timeout"},
+        meta=SENDER_META,
+    )
+    assert status == 200 and interrupted["status"] == "interrupted"
+    assert call(server, "GET", "/api/handoff/bag/T1-B9")[1]["owner_terminal"] == "T1"
+    assert call(server, "GET", "/api/handoff/reconcile")[1]["ok"] is True
+
+
+def test_handoff_history_and_timeline_are_queryable(server):
+    sheet = _start_handoff(server, "T1-B8")
+    call(server, "POST", f"/api/handoff/{sheet['id']}/confirm", {}, meta=RECEIVER_META)
+    status, returning = call(
+        server,
+        "POST",
+        "/api/handoff/return",
+        {"handoff_id": sheet["id"]},
+        meta=RECEIVER_META,
+    )
+    assert status == 201 and returning["to_terminal"] == "T1"
+
+    status, history = call(server, "GET", "/api/handoff/sheets", query={"bag_id": ["T1-B8"]})
+    assert [item["id"] for item in history] == [sheet["id"], returning["id"]]
+
+    status, timeline = call(server, "GET", "/api/handoff/bag/T1-B8/timeline")
+    assert timeline[0]["owner"] == "T2"
+
+
+def test_handoff_audit_entries_carry_the_caller_headers(server):
+    sheet = _start_handoff(server, "T1-B7")
+    call(server, "POST", f"/api/handoff/{sheet['id']}/confirm", {}, meta=RECEIVER_META)
+    status, entries = call(server, "GET", "/api/audit/bag/T1-B7")
+    assert status == 200
+    assert [item["kind"] for item in entries] == [
+        "handoff_register",
+        "handoff_opened",
+        "handoff_confirmed",
+    ]
+    assert entries[-1]["detail"]["operator"] == "agent-kim"
+    assert entries[-1]["detail"]["purpose"] == "receive hall transfer"
+    assert call(server, "GET", "/api/audit/verify")[1]["intact"] is True

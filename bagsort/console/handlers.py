@@ -3,18 +3,38 @@
 from __future__ import annotations
 
 from bagsort.checkin.entries import Entry
+from bagsort.handoff import OWNERSHIP_REASON, OWNERSHIP_RULE, render_sheet
+from bagsort.handoff.entities import Principal
 from bagsort.model.entities import Flight, Reading
 from bagsort.model.validate import validate_flight
 from bagsort.reporting import csv_export
 from bagsort.sequence.allocator import preview
 from bagsort.store.replay import replay
-from .http import Request, Response, csv_response, json_response, text_response
+from .http import Request, RequestError, Response, csv_response, json_response, text_response
 from .routes import route_table
 from .version import version_info
 
 
 def _plant(server):
     return server.plant
+
+
+def _principal(server, request: Request) -> Principal:
+    """Resolve the calling identity of a handoff call.
+
+    Identity is required: terminal, operator and stated purpose all have to be
+    present. Header values (``X-Terminal`` / ``X-Operator`` / ``X-Purpose``)
+    win over the body so a caller cannot impersonate the other hall through
+    its payload.
+    """
+
+    plant = _plant(server)
+    terminal = (request.meta.get("terminal") or request.str_field("terminal") or plant.namespace.terminal).strip().upper()
+    operator = (request.meta.get("operator") or request.str_field("operator")).strip()
+    purpose = (request.meta.get("purpose") or request.str_field("purpose")).strip()
+    if not operator or not purpose:
+        raise RequestError(400, "handoff calls require operator and purpose")
+    return Principal(terminal=terminal, operator=operator, purpose=purpose)
 
 
 # ---------------------------------------------------------------------------
@@ -758,6 +778,107 @@ def handle_rollback(server, request: Request) -> Response:
     plant = _plant(server)
     dropped = plant.store.rollback()
     return json_response({"dropped": dropped, "pending": len(plant.store.pending())})
+
+
+# ---------------------------------------------------------------------------
+# cross-terminal handoff
+# ---------------------------------------------------------------------------
+
+
+def handle_handoff_policy(server, request: Request) -> Response:
+    return json_response({"rule": OWNERSHIP_RULE, "reason": OWNERSHIP_REASON})
+
+
+def handle_handoff_registry(server, request: Request) -> Response:
+    return json_response(_plant(server).handoff.registry().rows())
+
+
+def handle_handoff_register(server, request: Request) -> Response:
+    plant = _plant(server)
+    entry = plant.register_handoff_bag(request.required("bag_id"), _principal(server, request))
+    return json_response(entry, status=201)
+
+
+def handle_handoff_ownership(server, request: Request) -> Response:
+    return json_response(_plant(server).handoff.verdict(request.param("bag")).as_dict())
+
+
+def handle_handoff_open(server, request: Request) -> Response:
+    plant = _plant(server)
+    sheet = plant.open_handoff(
+        request.required("bag_id"),
+        _principal(server, request),
+        request.str_field("to_terminal"),
+        request.str_field("note"),
+    )
+    return json_response(sheet.as_dict(), status=201)
+
+
+def handle_handoff_confirm(server, request: Request) -> Response:
+    plant = _plant(server)
+    sheet = plant.confirm_handoff(request.param("id"), _principal(server, request))
+    return json_response(sheet.as_dict())
+
+
+def handle_handoff_interrupt(server, request: Request) -> Response:
+    plant = _plant(server)
+    sheet = plant.interrupt_handoff(
+        request.param("id"),
+        _principal(server, request),
+        request.required("reason"),
+    )
+    return json_response(sheet.as_dict())
+
+
+def handle_handoff_sheets(server, request: Request) -> Response:
+    plant = _plant(server)
+    bag_id = request.query_str("bag_id")
+    sheets = plant.handoff.history(bag_id) if bag_id else plant.handoff.sheets()
+    return json_response([sheet.as_dict() for sheet in sheets])
+
+
+def handle_handoff_get(server, request: Request) -> Response:
+    return json_response(_plant(server).handoff.get(request.param("id")).as_dict())
+
+
+def handle_handoff_sheet_text(server, request: Request) -> Response:
+    return text_response(_plant(server).handoff_sheet_text(request.param("id")))
+
+
+def handle_handoff_carousel(server, request: Request) -> Response:
+    bag_id = request.query_str("bag_id")
+    records = _plant(server).handoff.carousel_records(bag_id)
+    return json_response([record.as_dict() for record in records])
+
+
+def handle_handoff_views(server, request: Request) -> Response:
+    plant = _plant(server)
+    terminal = request.param("terminal")
+    if terminal:
+        return json_response(plant.handoff.terminal_view(terminal))
+    return json_response(
+        {name: plant.handoff.terminal_view(name) for name in ("T1", "T2")}
+    )
+
+
+def handle_handoff_reconcile(server, request: Request) -> Response:
+    report = _plant(server).handoff_reconcile()
+    status = 200 if report["ok"] else 409
+    return json_response(report, status=status)
+
+
+def handle_handoff_rebuild_views(server, request: Request) -> Response:
+    return json_response(_plant(server).handoff.rebuild_views())
+
+
+def handle_handoff_return(server, request: Request) -> Response:
+    plant = _plant(server)
+    sheet = plant.handoff.reopen_return(request.required("handoff_id"), _principal(server, request))
+    return json_response(sheet.as_dict(), status=201)
+
+
+def handle_handoff_timeline(server, request: Request) -> Response:
+    return json_response(_plant(server).handoff.replay_ownership(request.param("bag")))
 
 
 # ---------------------------------------------------------------------------

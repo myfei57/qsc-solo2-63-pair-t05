@@ -28,7 +28,7 @@ def test_build_parser_lists_every_command():
     actions = [action for action in parser._actions if isinstance(action, argparse._SubParsersAction)]
     assert actions, "expected subcommands"
     names = set(actions[0].choices)
-    assert {"serve", "demo", "report", "status", "export", "seed", "reset"} <= names
+    assert {"serve", "demo", "handoff", "report", "status", "export", "seed", "reset"} <= names
 
 
 def test_demo_command_reports_the_summary(tmp_path, capsys):
@@ -36,6 +36,18 @@ def test_demo_command_reports_the_summary(tmp_path, capsys):
     assert main(["--state", str(state), "demo", "--cycles", "3"]) == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["sorted"] == 3
+    assert summary["audit_intact"] is True
+
+
+def test_handoff_command_reports_the_transfer_and_rollback(tmp_path, capsys):
+    state = tmp_path / "handoff.json"
+    assert main(["--state", str(state), "handoff"]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["rule"] == "on_confirmation"
+    # the completed transfer moves ownership, the interrupted one stays put
+    assert summary["owner_completed"] == "T1"
+    assert summary["owner_interrupted"] == "T1"
+    assert summary["reconciled"] is True
     assert summary["audit_intact"] is True
 
 

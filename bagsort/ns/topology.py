@@ -19,6 +19,10 @@ STAGES: tuple[str, ...] = (
     "chute",
     "recheck",
     "belt",
+    "handoff_register",
+    "handoff_open",
+    "handoff_confirm",
+    "handoff_interrupt",
     "audit",
 )
 

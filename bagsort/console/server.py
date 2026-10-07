@@ -40,6 +40,7 @@ class Server:
         path: str,
         payload: dict[str, object] | list[object] | None = None,
         query: dict[str, list[str]] | None = None,
+        meta: dict[str, str] | None = None,
     ) -> Response:
         handler, params, exists = self.router.match(method, path)
         if handler is None:
@@ -58,6 +59,7 @@ class Server:
             payload=fields,
             items=items,
             params=params,
+            meta=meta or {},
         )
         return guarded(lambda: handler(self, request))
 
